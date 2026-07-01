@@ -42,43 +42,96 @@ def find_band(bgr):
         x, y, w, h = cv2.boundingRect(c)
         if not (280 < w < 380 and 90 < h < 320):   # 팔레트 폭은 일정, 높이는 가변
             continue
-        sub = hsv[y:y + h, x:x + w]
-        hues = sub[:, :, 0][sub[:, :, 1] > 60]
-        if hues.size == 0 or int(np.ptp(hues)) < 90:   # wide hue variety = 그라데이션
-            continue
         cen = bgr[y + h // 5:y + 4 * h // 5, x + w // 3:x + 2 * w // 3]
-        (marked if _has_marker(cen) else plain).append((x, y, w, h))
-    pool = marked or plain
+        if _has_marker(cen):
+            # 중앙 흰 마커 = 팔레트의 확실한 신호. 색 범위가 좁아도(노랑-초록 등) 채택.
+            marked.append((x, y, w, h))
+        else:
+            # 마커 없는 후보는 넓은 hue 범위일 때만 폴백 대상으로(decoy 배제)
+            sub = hsv[y:y + h, x:x + w]
+            hues = sub[:, :, 0][sub[:, :, 1] > 60]
+            if hues.size and int(np.ptp(hues)) >= 90:
+                plain.append((x, y, w, h))
+    pool = marked or plain   # 마커 있는 것 우선; 없을 때만 넓은-hue 폴백
     if not pool:
         return None
-    return max(pool, key=lambda b: b[2] * b[3])   # marker 있는 것 우선, 그중 최대
+    return max(pool, key=lambda b: b[2] * b[3])
+
+
+def _marker_point(bgr, box):
+    """밴드 중앙 영역에서 흰 마커(핀)의 centroid (x,y) 반환. 없으면 None.
+    이 지점이 게임의 실제 색 샘플 지점 = 컨트롤러 기준점 C."""
+    x, y, w, h = box
+    rx0, ry0 = x + w // 3, y
+    sub = bgr[ry0:y + h, rx0:x + 2 * w // 3]
+    white = np.all(sub > 225, axis=2).astype(np.uint8)
+    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, _lab, stats, cents = cv2.connectedComponentsWithStats(white, 8)
+    best = None
+    for i in range(1, n):
+        a = int(stats[i, cv2.CC_STAT_AREA])
+        ww = int(stats[i, cv2.CC_STAT_WIDTH])
+        hh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        if 150 < a < 4000 and 0.5 < ww / max(hh, 1) < 2.0:
+            if best is None or a > best[0]:
+                best = (a, cents[i])
+    if best is None:
+        return None
+    return (int(rx0 + best[1][0]), int(ry0 + best[1][1]))
 
 
 def locate(bgr, ox=0, oy=0):
-    """전체화면 BGR에서 게임 영역을 검출. {answer_swatch, selected_swatch, palette} 또는 None."""
+    """전체화면 BGR에서 게임 영역을 검출. {answer_swatch, selected_swatch, palette, marker} 또는 None."""
     b = find_band(bgr)
     if b is None:
         return None
     bx, by, bw, bh = b
     ph = int(bw * _PAL_HFRAC)
-    return {
+    out = {
         "answer_swatch": Region(ox + bx + _ANS_DX, oy + by + _SW_DY, _SW, _SW),
         "selected_swatch": Region(ox + bx + _SEL_DX, oy + by + _SW_DY, _SW, _SW),
         "palette": Region(ox + bx, oy + by + _PAL_DY, bw, ph),
     }
+    mk = _marker_point(bgr, b)
+    if mk is not None:
+        out["marker"] = [ox + mk[0], oy + mk[1]]
+    return out
+
+
+def _locate_in_rect(full, ox, oy, rect):
+    l, t, r, b = rect
+    x0, y0 = max(0, l - ox), max(0, t - oy)
+    x1, y1 = min(full.shape[1], r - ox), min(full.shape[0], b - oy)
+    if x1 - x0 < 150 or y1 - y0 < 150:
+        return None
+    return locate(full[y0:y1, x0:x1], ox + x0, oy + y0)
 
 
 def locate_live():
-    """주 모니터를 잡아 게임 영역을 검출. dict 또는 None."""
+    """게임을 검출한다. 우선순위: (1) 커서 아래 창 (2) 활성 창 (3) 전체 화면.
+    사용자가 게임 창 위에 마우스를 올려두면 그 창 안에서만 찾으므로 다른 창의
+    컬러풀한 요소를 오검출하지 않는다. dict 또는 None."""
     import mss
+    from .input_win import window_under_cursor, foreground_rect
     with mss.mss() as sct:
         m = sct.monitors[1]
-        img = np.asarray(sct.grab(m))[:, :, :3]
-        return locate(img, m["left"], m["top"])
+        full = np.asarray(sct.grab(m))[:, :, :3]
+        ox, oy = m["left"], m["top"]
+    wc = window_under_cursor()
+    if wc is not None:
+        res = _locate_in_rect(full, ox, oy, wc[1])
+        if res is not None:
+            return res
+    fr = foreground_rect()
+    if fr is not None:
+        res = _locate_in_rect(full, ox, oy, fr)
+        if res is not None:
+            return res
+    return locate(full, ox, oy)
 
 
 def apply_to(cfg, regions):
-    """검출된 regions를 cfg에 반영(마커는 팔레트 중심 사용)."""
+    """검출된 regions를 cfg에 반영. C는 팔레트 기하중심 사용(marker=None)."""
     cfg.answer_swatch = regions["answer_swatch"]
     cfg.selected_swatch = regions["selected_swatch"]
     cfg.palette = regions["palette"]

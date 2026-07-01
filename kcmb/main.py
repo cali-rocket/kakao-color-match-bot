@@ -55,6 +55,7 @@ def main():
 
     dpi.set_dpi_aware()
     cfg = C.load()
+    headless = args.seconds > 0
 
     def relocate():
         reg = locate.locate_live()
@@ -63,36 +64,42 @@ def main():
             return True
         return False
 
-    if auto:
-        if relocate():
-            print("auto-located:", cfg.answer_swatch, cfg.selected_swatch, cfg.palette)
-        elif not C.is_calibrated(cfg):
-            print("게임 영역 자동검출 실패(게임 창이 화면에 보이나요?) & config도 없음")
-            return
-        else:
-            print("자동검출 실패 — config.json 좌표로 대체")
-    if not C.is_calibrated(cfg):
-        print("calibrate 먼저: python -m kcmb.calibrate (또는 자동검출용 게임 창을 띄우세요)")
-        return
-
-    Cpt = cfg.marker_point if cfg.marker_point is not None else cfg.palette.center()
-    empty = np.array(cfg.empty_color, dtype=float)
-    dim = float(min(cfg.palette.width, cfg.palette.height))
-    headless = args.seconds > 0
-
+    # arm 설정 + (헤드리스) 마우스로 게임 창 지목 유도
     if headless:
         class _Auto:
             armed = True
             should_quit = False
         hk = _Auto()
-        if args.focus_delay > 0:
-            print(f">>> {args.focus_delay:.0f}초 안에 카톡 게임 창을 클릭해 포커스하세요! (드래그가 그 창으로 갑니다)")
-            time.sleep(args.focus_delay)
         t_quit = _now() + args.seconds
+        if args.focus_delay > 0:
+            print(f">>> {args.focus_delay:.0f}초 안에 카톡 게임 창 위로 마우스를 올려두세요! (그 창을 인식해 플레이합니다)")
+            time.sleep(args.focus_delay)
+        if auto:
+            wc = input_win.window_under_cursor()
+            if wc is not None:
+                input_win.set_foreground(wc[0])   # 그 창을 앞으로(드래그가 전달되도록)
+                time.sleep(0.2)
     else:
         hk = install(HotkeyState())
         t_quit = None
         print("F8=arm/disarm, F9=quit." + (" (dry-run)" if args.dry_run else ""))
+
+    # 게임 영역 검출 (헤드리스면 커서가 게임 창 위 → 그 창 안에서만 탐색)
+    if auto:
+        if relocate():
+            print("게임 인식:", cfg.palette)
+        elif not C.is_calibrated(cfg):
+            print("게임을 찾지 못했습니다 — 마우스를 게임 창 위에 두었는지 확인하세요.")
+            return
+        else:
+            print("자동검출 실패 — config.json 좌표로 대체")
+    if not C.is_calibrated(cfg):
+        print("calibrate 먼저: python -m kcmb.calibrate")
+        return
+
+    Cpt = cfg.marker_point if cfg.marker_point is not None else cfg.palette.center()
+    empty = np.array(cfg.empty_color, dtype=float)
+    dim = float(min(cfg.palette.width, cfg.palette.height))
 
     ts = TargetState(cfg)
     gain = None
@@ -106,8 +113,6 @@ def main():
         if not hk.armed:
             continue
         if args.autostart and not started:
-            if auto and relocate():   # re-locate in case the window moved since launch
-                Cpt = cfg.palette.center()
             _start_drag(cfg, Cpt)
             started = True
 

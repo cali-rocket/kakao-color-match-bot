@@ -45,6 +45,45 @@ def vscreen_metrics():
             gsm(SM_CXVIRTUALSCREEN), gsm(SM_CYVIRTUALSCREEN))
 
 
+def foreground_rect():
+    """활성(foreground) 창의 사각형 (left, top, right, bottom) 물리픽셀. 없으면 None."""
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return None
+    return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+
+
+def window_under_cursor():
+    """커서 아래 최상위 창의 (hwnd, (left,top,right,bottom)). 없으면 None.
+    사용자가 게임 창 위에 마우스를 두면 그 창을 정확히 집어낸다."""
+    user32 = ctypes.windll.user32
+    user32.WindowFromPoint.argtypes = [wintypes.POINT]
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.GetAncestor.restype = wintypes.HWND
+    pt = wintypes.POINT()
+    user32.GetCursorPos(ctypes.byref(pt))
+    hwnd = user32.WindowFromPoint(pt)
+    if not hwnd:
+        return None
+    root = user32.GetAncestor(hwnd, 2) or hwnd   # GA_ROOT = 2 (최상위 창)
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(root, ctypes.byref(r)):
+        return None
+    return int(root), (int(r.left), int(r.top), int(r.right), int(r.bottom))
+
+
+def set_foreground(hwnd):
+    """해당 창을 활성(foreground)으로. 드래그 입력이 그 창에 전달되게 한다."""
+    try:
+        ctypes.windll.user32.SetForegroundWindow(int(hwnd))
+    except Exception:
+        pass
+
+
 def _send(flags, nx=0, ny=0):
     mi = _MOUSEINPUT(nx, ny, 0, flags, 0, 0)
     inp = _INPUT(0, _INPUT._U(mi))  # type 0 = INPUT_MOUSE
