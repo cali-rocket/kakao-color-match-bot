@@ -41,17 +41,23 @@ class Config:
     cluster_eps: float = 6
 
     gain_lambda: float = 0.5
-    gain_min: float = 0.05
-    gain_max: float = 20
+    gain_min: float = 0.10
+    gain_max: float = 2.5
     gain_smooth_alpha: float = 0.5
-    probe_frac: float = 0.12
-    probe_min_shift_px: float = 4
-    move_floor_px: float = 15
-    max_drag_frac: float = 0.6
+    probe_frac: float = 0.12        # controller.probe_plan (fraction of palette dim)
+    probe_px: float = 34            # main loop absolute probe size (px)
+    probe_min_shift_px: float = 3
+    move_floor_px: float = 15       # controller.update_gain gate
+    max_drag_frac: float = 0.5
     e_deadband_px: float = 4
-    stall_no_improve_n: int = 3
-    improve_margin: float = 3
-    round_budget_ms: int = 2800
+    gain_gate_mind: float = 10      # trust gain updates only when target well-located
+    chase_mind: float = 40          # above this, probe instead of gain-correct (unreliable P)
+    hold_margin: float = 60         # divergence protection: hold if far worse than best
+    round_budget_ms: int = 2900
+
+    # empty/waiting swatch color (game shows this between rounds / before start)
+    empty_color: List[int] = field(default_factory=lambda: [247, 247, 247])
+    empty_tol: float = 12
 
     loop_delay_ms: int = 15
     drag_pre_dwell_ms: int = 20
