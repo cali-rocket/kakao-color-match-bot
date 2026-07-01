@@ -25,17 +25,17 @@
 ```
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements-dev.txt
-.venv/Scripts/python -m pytest -q            # 단위 테스트 (33 pass)
+.venv/Scripts/python -m pytest -q            # 단위 테스트 (36 pass)
 
-.venv/Scripts/python -m kcmb.calibrate       # 1) 영역 지정(정답/선택/팔레트/마커)
-.venv/Scripts/python -m kcmb.probe           # 2) 상호작용 실측(드래그 부호/팬/플링)
-.venv/Scripts/python -m kcmb.main --dry-run  # 3) 목표 좌표 검증(debug/ 이미지)
-.venv/Scripts/python -m kcmb.main            # 4) 실플레이 (F8 arm, F9 quit)
-# 헤드리스(핫키 없이): 시작 드래그 + 지정 시간 자동 플레이
-.venv/Scripts/python -m kcmb.main --autostart --seconds 26
+# 게임 창을 띄운 상태에서 (영역은 자동검출 — 캘리브레이션 불필요):
+.venv/Scripts/python -m kcmb.main --autostart --seconds 26   # 시작 드래그+자동 플레이
+.venv/Scripts/python -m kcmb.main                            # F8 arm / F9 quit
 ```
 
-> 카톡 게임 창이 foreground여야 드래그가 등록됩니다. 실행 직전 게임 창을 클릭해 두세요.
+- **자동검출 기본**: 봇이 매 실행 시 게임 창(팔레트+스와치)을 화면에서 찾으므로
+  **창을 옮겨도 동작**한다. `--no-auto`로 끄고 `config.json` 고정 좌표를 쓸 수 있고,
+  고정 좌표는 `python -m kcmb.calibrate`로 만든다.
+- 카톡 게임 창이 foreground여야 드래그가 등록됩니다. 실행 직전 게임 창을 클릭해 두세요.
 
 - 카카오톡과 봇은 같은 권한(둘 다 비관리자 권장)으로 실행.
 - `config.json`(기기별 좌표)과 `debug/`는 커밋하지 않음(.gitignore).

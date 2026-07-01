@@ -5,7 +5,7 @@ import time
 import numpy as np
 import cv2
 
-from . import dpi, capture, config as C, input_win, controller as K
+from . import dpi, capture, config as C, input_win, controller as K, locate
 from .coloralg import swatch_color, color_dist, find_nearest_cluster
 from .targetstate import TargetState
 from .hotkeys import HotkeyState, install
@@ -46,12 +46,31 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="계산만, 드래그 안 함")
     ap.add_argument("--autostart", action="store_true", help="시작 시 팔레트 드래그로 게임 시작")
     ap.add_argument("--seconds", type=float, default=0.0, help=">0이면 F8 없이 그 시간 동안 자동 실행")
+    ap.add_argument("--no-auto", action="store_true",
+                    help="자동검출 끄고 config.json 고정 좌표 사용")
     args = ap.parse_args()
+    auto = not args.no_auto   # 기본: 게임 영역 자동검출(창 이동에 무관)
 
     dpi.set_dpi_aware()
     cfg = C.load()
+
+    def relocate():
+        reg = locate.locate_live()
+        if reg is not None:
+            locate.apply_to(cfg, reg)
+            return True
+        return False
+
+    if auto:
+        if relocate():
+            print("auto-located:", cfg.answer_swatch, cfg.selected_swatch, cfg.palette)
+        elif not C.is_calibrated(cfg):
+            print("게임 영역 자동검출 실패(게임 창이 화면에 보이나요?) & config도 없음")
+            return
+        else:
+            print("자동검출 실패 — config.json 좌표로 대체")
     if not C.is_calibrated(cfg):
-        print("calibrate 먼저: python -m kcmb.calibrate")
+        print("calibrate 먼저: python -m kcmb.calibrate (또는 자동검출용 게임 창을 띄우세요)")
         return
 
     Cpt = cfg.marker_point if cfg.marker_point is not None else cfg.palette.center()
@@ -82,6 +101,8 @@ def main():
         if not hk.armed:
             continue
         if args.autostart and not started:
+            if auto and relocate():   # re-locate in case the window moved since launch
+                Cpt = cfg.palette.center()
             _start_drag(cfg, Cpt)
             started = True
 
