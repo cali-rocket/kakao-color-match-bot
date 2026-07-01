@@ -25,6 +25,24 @@ def test_find_band_none_on_plain():
     assert locate.find_band(img) is None
 
 
+def _band_into(img, x0, y0):
+    for x in range(320):
+        hue = int(x / 320 * 179)
+        img[y0:y0 + 180, x0 + x] = cv2.cvtColor(np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR)[0, 0]
+
+
+def test_prefers_band_with_marker():
+    # two gradient bands; only the second has a white marker (the real palette)
+    img = np.full((700, 1200, 3), 255, np.uint8)
+    _band_into(img, 100, 100)                 # decoy, no marker
+    _band_into(img, 700, 400)                 # real
+    cv2.circle(img, (700 + 160, 400 + 90), 12, (255, 255, 255), -1)
+    b = locate.find_band(img)
+    assert b is not None
+    x, y, w, h = b
+    assert abs(x - 700) < 14 and abs(y - 400) < 14
+
+
 def test_locate_offsets_apply_origin():
     r = locate.locate(_scene(), ox=1000, oy=500)
     assert r is not None

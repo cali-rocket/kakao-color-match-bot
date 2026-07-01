@@ -16,25 +16,42 @@ _PAL_DY = -3
 _PAL_HFRAC = 0.75
 
 
+def _has_marker(sub_bgr):
+    """중앙 영역에 게임의 흰 마커(핀)로 보이는 compact near-white blob이 있는가."""
+    white = np.all(sub_bgr > 225, axis=2).astype(np.uint8)
+    white = cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, _lab, stats, _c = cv2.connectedComponentsWithStats(white, 8)
+    for i in range(1, n):
+        a = stats[i, cv2.CC_STAT_AREA]
+        w = stats[i, cv2.CC_STAT_WIDTH]
+        h = stats[i, cv2.CC_STAT_HEIGHT]
+        if 150 < a < 4000 and 0.5 < w / max(h, 1) < 2.0:
+            return True
+    return False
+
+
 def find_band(bgr):
-    """팔레트의 채도 그라데이션 밴드 (x,y,w,h) 반환, 없으면 None."""
+    """팔레트의 색 그라데이션 영역 (x,y,w,h) 반환, 없으면 None.
+    폭(~일정)으로 후보를 좁히고, 중앙의 흰 마커 존재로 아이콘/썸네일 등 오검출을 배제."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     mask = (hsv[:, :, 1] > 60).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     cnts, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    best = None
+    marked, plain = [], []
     for c in cnts:
         x, y, w, h = cv2.boundingRect(c)
-        if not (280 < w < 380 and 60 < h < 300 and w / h >= 1.4):
+        if not (280 < w < 380 and 90 < h < 320):   # 팔레트 폭은 일정, 높이는 가변
             continue
         sub = hsv[y:y + h, x:x + w]
         hues = sub[:, :, 0][sub[:, :, 1] > 60]
-        if hues.size == 0 or int(np.ptp(hues)) < 70:   # wide hue variety = gradient
+        if hues.size == 0 or int(np.ptp(hues)) < 90:   # wide hue variety = 그라데이션
             continue
-        area = w * h
-        if best is None or y < best[1] - 5 or (abs(y - best[1]) <= 5 and area > best[4]):
-            best = (x, y, w, h, area)   # prefer the topmost / largest band
-    return None if best is None else best[:4]
+        cen = bgr[y + h // 5:y + 4 * h // 5, x + w // 3:x + 2 * w // 3]
+        (marked if _has_marker(cen) else plain).append((x, y, w, h))
+    pool = marked or plain
+    if not pool:
+        return None
+    return max(pool, key=lambda b: b[2] * b[3])   # marker 있는 것 우선, 그중 최대
 
 
 def locate(bgr, ox=0, oy=0):
