@@ -8,8 +8,25 @@
 
 ## 상태
 
-🚧 **설계 단계** — 아직 구현 전. 설계 문서:
-[docs/superpowers/specs/2026-07-01-kakao-color-match-bot-design.md](docs/superpowers/specs/2026-07-01-kakao-color-match-bot-design.md)
+✅ **코드 구현 완료 · 오프라인 테스트 통과(33 pass)** — 실게임 실측/튜닝 남음.
+- 설계: [docs/superpowers/specs/2026-07-01-kakao-color-match-bot-design.md](docs/superpowers/specs/2026-07-01-kakao-color-match-bot-design.md)
+- 구현 계획: [docs/superpowers/plans/2026-07-01-kakao-color-match-bot.md](docs/superpowers/plans/2026-07-01-kakao-color-match-bot.md)
+
+## 실행 방법 (Windows)
+
+```
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements-dev.txt
+.venv/Scripts/python -m pytest -q            # 단위 테스트 (33 pass)
+
+.venv/Scripts/python -m kcmb.calibrate       # 1) 영역 지정(정답/선택/팔레트/마커)
+.venv/Scripts/python -m kcmb.probe           # 2) 상호작용 실측(드래그 부호/팬/플링)
+.venv/Scripts/python -m kcmb.main --dry-run  # 3) 목표 좌표 검증(debug/ 이미지)
+.venv/Scripts/python -m kcmb.main            # 4) 실플레이 (F8 arm, F9 quit)
+```
+
+- 카카오톡과 봇은 같은 권한(둘 다 비관리자 권장)으로 실행.
+- `config.json`(기기별 좌표)과 `debug/`는 커밋하지 않음(.gitignore).
 
 ## 동작 개요
 
