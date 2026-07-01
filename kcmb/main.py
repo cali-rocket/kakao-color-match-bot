@@ -48,6 +48,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=0.0, help=">0이면 F8 없이 그 시간 동안 자동 실행")
     ap.add_argument("--no-auto", action="store_true",
                     help="자동검출 끄고 config.json 고정 좌표 사용")
+    ap.add_argument("--focus-delay", type=float, default=3.0,
+                    help="헤드리스 시작 전 게임 창을 클릭할 시간(초)")
     args = ap.parse_args()
     auto = not args.no_auto   # 기본: 게임 영역 자동검출(창 이동에 무관)
 
@@ -83,6 +85,9 @@ def main():
             armed = True
             should_quit = False
         hk = _Auto()
+        if args.focus_delay > 0:
+            print(f">>> {args.focus_delay:.0f}초 안에 카톡 게임 창을 클릭해 포커스하세요! (드래그가 그 창으로 갑니다)")
+            time.sleep(args.focus_delay)
         t_quit = _now() + args.seconds
     else:
         hk = install(HotkeyState())
