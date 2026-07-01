@@ -1,358 +1,331 @@
-# 카카오톡 색 맞추기 미니게임 자동 플레이 봇 — 설계 문서 (v2)
+# 카카오톡 색 맞추기 미니게임 자동 플레이 봇 — 설계 문서 (v3)
 
 - 작성일: 2026-07-01
-- 상태: 초안 v2 (4-critic 리뷰 반영, 사용자 리뷰 대기)
-- v2 변경: 상태 머신 재작성/모듈 분리, 색 거리 지표 통일, min-distance fail-safe
-  가드, 클러스터 중심점 클릭, BGRA alpha 처리, DPI/포커스/selectROI 정합성 등
-  자체 리뷰(기술/일관성/스코프/견고성 4개 critic) 결과 반영.
+- 상태: 초안 v3 (조작 메커니즘 정정 반영, 사용자 리뷰 대기)
+- v3 변경 (중요): **조작 방식이 "클릭"이 아니라 "드래그"임이 확인됨.** 컬러
+  피커(마커)는 팔레트 **정중앙에 고정**이고, 팔레트를 드래그해 색 판을 움직여
+  원하는 색을 중앙 마커로 가져오는 구조. 이에 따라 접근법을 **단발 클릭 →
+  피드백 루프(closed-loop) 드래그 제어**로 전면 교체.
+- v2 대비 유지: DPI 처리, BGRA→BGR, 색 거리 지표, 캘리브레이션 골격, 안전장치,
+  순수/IO 분리, 테스트 전략. 교체: 상태 머신 → 타깃 디바운스 + 드래그 컨트롤러.
 
 ## 1. 목표
 
-카카오톡 PC 클라이언트에서 실행되는 "정답과 같은 색 찾기" 미니게임을,
-제한 시간 3초 안에 자동으로 풀어주는 프로그램을 만든다.
+카카오톡 PC 클라이언트의 "정답과 같은 색 찾기" 미니게임(라운드당 3초, 5라운드)을
+자동으로 풀어준다.
 
-- 매 라운드 정답(정답 스와치) 색을 화면에서 읽는다.
-- 그 순간의 컬러 팔레트를 **새로 캡처**해, 색이 가장 가까운 픽셀(정확히는 최적
-  매칭 클러스터의 중심점)의 화면 좌표를 찾아 클릭한다.
-- 5라운드를 완전 자동으로 반복 처리한다.
+### 1.1 게임 조작 메커니즘 (확인됨)
 
-### 1.1 핵심 원리와 그 전제 (중요)
+- 컬러 팔레트(2D 색 판) 위에 **컬러 피커(마커)가 정중앙에 고정**되어 있다.
+- **마커 지점의 색 = `선택` 스와치에 표시되는 색 (완전히 동일).**
+- 사용자가 **팔레트를 드래그하면 색 판 자체가 움직이고**, 중앙 마커 아래로 오는
+  색이 바뀐다. (클릭한 위치로 마커가 이동하는 것이 **아님**.)
+- 따라서 정답을 맞추려면 **정답 색이 중앙 마커에 오도록 색 판을 드래그**해야 한다.
+- 팔레트는 각 위치에 그 색을 실제로 표시한다(중앙 = 현재 선택). 즉 정답 색이
+  화면 팔레트 어디에 있는지 위치로 찾을 수 있다.
 
-접근법: 팔레트의 색 모델(HSV 등)을 역산하지 않고, "정답 색 읽기 → 팔레트
-캡처 → 최근접 색 위치 클릭"만 한다.
+### 1.2 접근법: 피드백 루프(closed-loop) 드래그 제어
 
-**이 접근법은 하나의 전제 위에 서 있다: "정답 색이 캡처한 팔레트 영역 안에
-실제 픽셀로 (거의) 정확히 존재한다."** 그래야 최근접 픽셀의 거리가 ~0이 되어
-정확한 클릭 지점을 찾는다.
+정답 색을 중앙으로 "한 번에" 끌어오려면 드래그 이동량 대비 색 판 이동량의
+비율(gain)을 정확히 알아야 하지만, 이 비율은 미지수다(1:1 공간 팬인지, drag
+양에 비례한 rate 변화인지 불확실). 그래서 **개루프(한 번 계산해 끝)가 아니라
+폐루프**로 간다:
 
-이 전제는 **미검증이며, 창백/저채도 정답에서 깨질 수 있다.** 예: 예시 화면의
-정답은 창백한 크림색인데 팔레트는 고채도로 보인다. 만약 이 게임이 밝기/명도를
-별도 슬라이더로 두는 구조라면, 창백한 색은 팔레트 픽셀에 존재하지 않고,
-최근접 탐색은 팔레트의 가장 흰/옅은 모서리를 "자신 있게 틀리게" 클릭한다.
+1. `정답`(목표) 색과 현재 `선택`(중앙) 색을 읽는다.
+2. 화면 팔레트에서 정답 색의 **현재 위치 P**를 찾는다(중앙 C까지의 오차 벡터 e = P−C).
+3. e를 줄이는 방향으로 **드래그 한 번** 실행.
+4. `선택` 색을 **다시 읽어** 목표에 도달했는지 확인. 아니면 실측으로 gain을
+   보정하고 2로 반복 — 3초 예산 안에서 수렴시킨다.
 
-→ 따라서 설계는 **이 전제에 의존하지 않고 fail-safe로 동작**해야 한다(§2.1,
-§5.4, §8). 그리고 구현 전/중에 **실측(§11.3)으로 전제를 검증**한다.
+- **자기검증**: 성공 여부를 `선택` 색으로 직접 관측하므로, "정답이 팔레트에서
+  도달 가능한가?"가 관측 가능해진다(도달 못 하면 best-effort로 최대한 근접).
+- gain을 몰라도 관측 기반 보정으로 수렴한다(합리적 gain 범위에서 수축).
 
-## 2. 실행 환경 / 확정된 결정 사항
+## 2. 실행 환경 / 확정 사항
 
 | 항목 | 결정 |
 | --- | --- |
 | 게임 실행 위치 | 카카오톡 PC 클라이언트 (Windows 11) |
-| 조작 방식 | PC 화면 캡처 + 마우스 직접 클릭 |
-| 자동화 수준 | 완전 자동 루프 (정답 색 변화를 새 라운드 신호로 감지) |
-| 영역 설정 | 수동 캘리브레이션 1회 (드래그로 지정, config에 저장) |
-| 안전장치 | F8 arm/disarm 토글, F9 종료. 시작 시 disarm |
+| 조작 방식 | 화면 캡처 + **마우스 드래그** (피드백 루프) |
+| 자동화 수준 | 완전 자동 (정답 색 변화로 새 라운드 감지) |
+| 영역 설정 | 수동 캘리브레이션 1회 (정답/선택 스와치 + 팔레트 + 마커점) |
+| 안전장치 | F8 arm/disarm(시작 disarm), F9 종료 |
 | 언어/런타임 | Python 3.x (Windows) |
-| 권한 | 봇과 카카오톡을 **동일 integrity level**로 실행(둘 다 비관리자 권장). 전역 훅/클릭이 서로 도달하려면 필요 |
+| 권한 | 봇과 카카오톡을 동일 integrity level로 실행(둘 다 비관리자 권장) |
 
 ### 2.1 fail-safe 원칙
 
-- **min-distance 가드**: 최적 매칭의 색 거리가 `max_match_dist`를 초과하면,
-  "정답이 팔레트에 없음(풀 수 없음)"으로 보고 **클릭하지 않는다**(자신 있게
-  틀리느니 그 라운드를 건너뛴다). 로그로 남긴다.
-- **disarm 우선**: F8로 언제든 즉시 마우스 조작 중단.
-- **미캘리브레이션 가드**: 영역이 0이면 실행 거부(§6.1).
+- **수렴 관측**: 매 반복 `선택`↔`정답` 색 거리를 측정. `match_tolerance` 이내면
+  성공. 라운드 예산 내 미수렴이면 최근접 상태로 멈추고 로그(자신 있게 틀린
+  드래그를 남발하지 않음).
+- **역방향/발산 감지**: 드래그 후 오차가 커지면 방향/gain을 반전·감쇠(§5.4).
+- **disarm 우선**: F8로 즉시 중단. **미캘리브레이션 가드**로 실행 거부(§6.1).
 
 ## 3. 기술 스택
 
 | 용도 | 라이브러리 | 비고 |
 | --- | --- | --- |
-| 화면 캡처 | `mss` | 영역 캡처, **BGRA(4채널) 반환 → alpha 즉시 제거** |
+| 화면 캡처 | `mss` | 영역 캡처, BGRA(4채널) → alpha 즉시 제거 |
 | 색 계산 | `numpy` | 벡터화 거리 계산 |
-| 클러스터/캘리브 | `opencv-python` | `connectedComponentsWithStats`, `selectROI` |
-| 마우스 클릭 | `ctypes` (Win32 `SendInput`) | DPI 배율 회피 위해 물리 픽셀 절대 좌표 |
-| 전역 단축키 | `keyboard` | F8 토글 / F9 종료 (§3.2 권한 주의) |
+| 클러스터/캘리브 | `opencv-python` | connectedComponentsWithStats, selectROI |
+| 마우스 드래그 | `ctypes` (Win32 `SendInput`) | DPI-aware 물리 픽셀, 보간 이동 포함 |
+| 전역 단축키 | `keyboard` | F8/F9 (§3.2 권한 주의) |
 
 ### 3.1 DPI 처리 (중요, 순서 제약)
 
-DPI aware 설정은 **어떤 창/스크린샷 생성보다 먼저**, 각 진입점(`calibrate.py`,
-`main.py`)의 첫 줄에서 호출한다(`dpi.set_dpi_aware()`). 특히 `calibrate.py`는
-OpenCV HighGUI 창을 열기 때문에 그 전에 호출해야 한다.
+각 진입점(`calibrate.py`, `main.py`) **첫 줄**에서 `dpi.set_dpi_aware()` 호출
+(어떤 창/스크린샷 생성보다 먼저 — calibrate는 OpenCV 창을 열기 때문). 3-단계
+폴백을 각각 `try/except (AttributeError, OSError)`로 감싼다:
+1. `user32.SetProcessDpiAwarenessContext(c_void_p(-4))`  # PER_MONITOR_AWARE_V2
+2. `shcore.SetProcessDpiAwareness(2)`                     # PER_MONITOR_AWARE v1
+3. `user32.SetProcessDPIAware()`                          # 레거시
 
-`set_dpi_aware()`는 아래 순서로 시도하며 각 호출을 `try/except (AttributeError,
-OSError)`로 감싼다(구버전/매니페스트 선설정 대비):
-1. `user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))`  # PER_MONITOR_AWARE_V2 (Win10 1703+/Win11 권장)
-2. `shcore.SetProcessDpiAwareness(2)`  # PER_MONITOR_AWARE v1 (Win8.1+)
-3. `user32.SetProcessDPIAware()`  # 레거시 시스템 DPI
+DPI-aware가 되면 `mss` 캡처와 `SendInput`/`SetCursorPos`가 동일한 물리 픽셀
+좌표 공간을 공유한다(캡처 좌표 = 드래그 좌표 보장).
 
-DPI-aware가 되면 `mss` 캡처와 `SendInput`(SetCursorPos 포함)이 **동일한 물리
-픽셀 좌표 공간**을 공유한다 — 이것이 캡처 좌표=클릭 좌표를 보장하는 근거다.
+### 3.2 단축키/입력 권한 주의
 
-### 3.2 단축키/클릭 권한 주의
-
-- `keyboard`는 Windows에서 대개 관리자 권한 없이 전역 훅이 동작한다. 단
-  **카카오톡이 관리자 권한으로 실행되면** UIPI 때문에 비관리자 봇의 훅/클릭이
-  그 창에 도달하지 못한다 → 둘의 integrity level을 맞춘다(둘 다 비관리자 권장).
-- 대안: 두 개 정도의 핫키는 `RegisterHotKey`(ctypes)로 등록하면 더 안정적.
-  v1은 `keyboard`로 시작하되 통합 테스트에서 게임 창 포커스 상태로 토글 동작을
-  반드시 확인한다.
+카카오톡이 관리자 권한으로 실행되면 UIPI 때문에 비관리자 봇의 전역 훅/드래그가
+그 창에 도달하지 못한다 → integrity level을 맞춘다(둘 다 비관리자 권장). 통합
+테스트에서 게임 창 포커스 상태로 F8/F9와 드래그 입력이 실제로 먹는지 확인.
 
 ## 4. 색 거리 지표 (전 구간 단일 정의)
 
-모든 색 비교는 **BGR 유클리드 거리**로 통일한다:
-
 ```
-color_dist(a, b) = sqrt( (a.b-b.b)^2 + (a.g-b.g)^2 + (a.r-b.r)^2 )   # 범위 0 ~ 441.67
+color_dist(a, b) = sqrt((a.b-b.b)^2 + (a.g-b.g)^2 + (a.r-b.r)^2)   # 0 ~ 441.67
 ```
 
-- 상태 머신 임계값(`stability_tolerance`, `new_round_threshold`)과 매칭 가드
-  (`max_match_dist`)는 모두 이 지표(0~441) 기준의 값이다.
-- sRGB(감마 인코딩) 상의 유클리드 거리는 지각적으로 균일하지 않다. 정확히
-  일치하는 픽셀이 존재할 때는 문제없지만(거리 ~0), min-distance가 커지는
-  경우엔 지각적으로 틀릴 수 있다 → 이때는 클릭을 거부한다(§2.1). (선택적
-  향후 개선: min-distance가 애매할 때 CIELAB 재계산.)
+- `match_tolerance`, `stability_tolerance`, `new_round_threshold`, `cluster_eps`는
+  모두 이 지표(0~441) 기준. sRGB 유클리드는 지각적으로 완전 균일하진 않지만,
+  폐루프가 `선택`을 목표로 직접 수렴시키므로 실용상 충분(필요 시 CIELAB로 교체 가능).
 
 ## 5. 아키텍처 / 모듈 구성
 
-각 모듈은 단일 책임을 가지며, 순수 로직과 I/O를 분리해 화면 없이 단위 테스트가
-가능하게 한다.
-
 ```
 color/
-├── config.py       # config.json 로드/저장/검증, Region 데이터클래스, is_calibrated()
-├── dpi.py          # set_dpi_aware() (3-단계 폴백, try/except)
+├── config.py       # config.json 로드/저장/검증, Region/Point, is_calibrated()
+├── dpi.py          # set_dpi_aware() (3-단계 폴백)
 ├── capture.py      # [I/O] mss 래퍼: grab(region) -> BGR ndarray (alpha 제거)
 ├── coloralg.py     # [순수] color_dist, swatch_color(+dispersion), find_nearest_cluster
-├── roundstate.py   # [순수] RoundState: observe()/mark_solved() 상태 머신
-├── clicker.py      # [I/O] Win32 SendInput 클릭 (foreground/이동/dwell/hold)
-├── hotkeys.py      # [I/O] F8 arm 토글, F9 종료 (keyboard)
-├── calibrate.py    # 진입점: 가상화면 캡처 + selectROI(스케일 안전) -> config.json
-├── main.py         # 진입점: 루프 배선 + --dry-run + 미캘리브 가드 + rate 가드
+├── controller.py   # [순수] 드래그 컨트롤러: is_matched/plan_drag/update_gain
+├── targetstate.py  # [순수] 정답색 디바운스 → 안정 타깃 + 라운드 변화 감지
+├── clicker.py      # [I/O] Win32 SendInput: move/click/**drag**(보간)
+├── hotkeys.py      # [I/O] F8 arm 토글, F9 종료
+├── calibrate.py    # 진입점: 스케일-안전 selectROI + 마커점 → config.json
+├── main.py         # 진입점: 폐루프 배선 + --dry-run + 가드
 ├── requirements.txt
 └── README.md
 ```
 
-### 5.1 `coloralg.py` (순수 함수, 화면 불필요)
+### 5.1 `coloralg.py` (순수)
 
-- `color_dist(a, b) -> float` — §4 정의.
-- `swatch_color(img_bgr) -> (color_bgr, dispersion)`
-  - 중앙 50% 영역만 크롭(둥근 모서리/테두리/그림자 배제).
-  - `color` = 채널별 median (평탄 스와치의 대표색).
-  - `dispersion` = 크롭 내 픽셀 산포도(채널별 MAD의 평균 등). **blended/전환
-    중간/가림 프레임 감지용** — 산포가 크면 그 프레임은 "안정 색"으로 쓰지 않음.
-- `find_nearest_cluster(palette_bgr, target_bgr, eps) -> (col, row, min_dist)`
-  - `dist2 = ((palette.astype(int32) - target)**2).sum(axis=2)` (모두 3채널 보장).
-  - `min_dist = sqrt(dist2.min())`.
-  - `mask = dist2 <= (min_dist + eps)**2` → `cv2.connectedComponentsWithStats`로
-    가장 큰 컴포넌트 선택 → 그 **중심점(centroid)** 의 (col, row) 반환.
-  - 단일 argmin 대신 클러스터 중심을 쓰는 이유: 노이즈/안티에일리어싱 경계/
-    마커 헤일로에 강인하고, 동질 색 영역 내부를 클릭하게 됨.
+- `color_dist(a, b) -> float` — §4.
+- `swatch_color(img_bgr) -> (color_bgr, dispersion)` — 중앙 50% 크롭의 채널별
+  median = 대표색; 산포(MAD 평균) = 전환/가림 프레임 감지용.
+- `find_nearest_cluster(palette_bgr, target_bgr, eps) -> (col, row, min_dist)` —
+  `dist2` 최소 픽셀 집합을 `min_dist+eps`로 임계 → 최대 연결성분의 **중심점**
+  (col,row) 반환. 노이즈/안티에일리어싱/마커 헤일로에 강인. **팔레트에서 정답
+  색의 현재 위치 P를 찾는 데 사용.**
 
-### 5.2 `roundstate.py` (순수 상태 머신, 화면 불필요)
+### 5.2 `controller.py` (순수 드래그 컨트롤러 — 핵심 신규)
 
-색 시퀀스만으로 "언제 풀지"를 결정한다. I/O 없음 → 시퀀스 입력 단위 테스트.
+색/좌표 값만으로 다음 드래그를 계산한다. I/O 없음 → 시뮬레이션 단위 테스트 가능.
 
-상태: `WAIT_STABLE`(새 정답이 안정되길 대기), `SOLVED`(이번 라운드 처리 완료,
-색이 바뀌길 대기).
+- `is_matched(current_bgr, target_bgr, tol) -> bool` — `color_dist <= tol`.
+- `plan_drag(e, gain, center, bounds, max_frac) -> (start_pt, end_pt) | None`
+  - `e = P - C` (오차 벡터). 색 판을 `-e`만큼 이동시켜야 함(콘텐츠는 커서를
+    따라 이동하므로 필요한 커서 이동 `v = -e / gain`).
+  - 팔레트 경계(`bounds`)와 `max_frac`(한 번에 팔레트 치수의 최대 비율)로 `v`를
+    클램프 → 큰 오차는 여러 번 나눠 드래그(폐루프가 이어받음).
+  - `start_pt`는 이동 여유가 있도록 중앙에서 `+ê` 쪽으로 오프셋한 점, `end_pt =
+    start_pt + v_clamped`. 둘 다 팔레트 내부.
+- `update_gain(gain, last_cursor_move, measured_field_shift) -> new_gain`
+  - 직전 커서 이동 대비 타깃 위치 실제 변화(= 색 판 이동)로 gain 추정,
+    지수 평활로 갱신. Newton식으로 다음 스텝이 목표에 근접.
+- **발산 가드**: 오차가 줄지 않으면(부호 반대/과도) 방향 반전·gain 감쇠(호출측
+  main이 measured_field_shift로 감지, controller가 규칙 제공).
+
+### 5.3 `targetstate.py` (순수)
+
+`정답` 색을 디바운스해 **안정 타깃**을 제공하고 라운드 변화를 감지.
 
 ```
-class RoundState(cfg):
-  state = WAIT_STABLE
-  last_solved_color = None
-  prev_frame_color  = None
-  stable_count      = 0
-
-  def observe(self, color, dispersion) -> action:   # action ∈ {None, 'ATTEMPT'}
-    # 1) 전환/가림 프레임 배제
-    if dispersion > cfg.dispersion_tolerance:
-        self.stable_count = 0
-        self.prev_frame_color = color
-        return None
-
-    # 2) 안정성 카운터 (N-프레임)
-    if self.prev_frame_color is not None and \
-       color_dist(color, self.prev_frame_color) <= cfg.stability_tolerance:
+class TargetState(cfg):
+  target = None; prev = None; stable_count = 0
+  def observe(self, answer_color, dispersion) -> event:  # event ∈ {None,'NEW_TARGET'}
+    if dispersion > cfg.dispersion_tolerance:            # 전환/가림 프레임 배제
+        self.stable_count = 0; self.prev = answer_color; return None
+    if self.prev is not None and color_dist(answer_color, self.prev) <= cfg.stability_tolerance:
         self.stable_count += 1
     else:
         self.stable_count = 0
-    self.prev_frame_color = color
-    is_stable = self.stable_count >= cfg.stability_frames
-
-    # 3) 상태별 처리
-    if self.state == WAIT_STABLE:
-        if is_stable and (self.last_solved_color is None or
-                          color_dist(color, self.last_solved_color) > cfg.new_round_threshold):
-            return 'ATTEMPT'        # main이 팔레트 캡처+매칭+클릭 수행
-    elif self.state == SOLVED:
-        # 정답이 충분히 다른 색으로 '변화'해야 다음 라운드 대기로 복귀
-        if self.last_solved_color is not None and \
-           color_dist(color, self.last_solved_color) > cfg.new_round_threshold:
-            self.state = WAIT_STABLE
-            self.stable_count = 0
+    self.prev = answer_color
+    if self.stable_count >= cfg.stability_frames:
+        if self.target is None or color_dist(answer_color, self.target) > cfg.new_round_threshold:
+            self.target = answer_color
+            return 'NEW_TARGET'
     return None
-
-  def mark_solved(self, color):    # main이 ATTEMPT 처리 후(클릭했든 가드로 스킵했든) 호출
-    self.last_solved_color = color
-    self.state = SOLVED
 ```
 
-- **첫 라운드 trace**: 초기 `WAIT_STABLE`, `last_solved_color=None`,
-  `prev_frame_color=None`. 첫 프레임: prev=None이므로 stable_count=0(불안정),
-  prev←color. 같은 색 프레임이 이어지면 stable_count가 오르고,
-  `stable_count>=stability_frames`가 되는 순간 `last_solved_color=None` 조건으로
-  `ATTEMPT` 반환 → 첫 라운드가 확실히 풀린다(데드락 없음).
-- **중복 클릭 방지**: `ATTEMPT` 후 `mark_solved`가 `SOLVED`로 전환. 같은 색이
-  유지되는 동안은 다시 풀지 않음.
-- **재무장**: 정답이 `new_round_threshold`를 넘겨 변하면 `WAIT_STABLE` 복귀.
-- **알려진 한계**: 연속 두 라운드의 정답 색이 `new_round_threshold` 이내로
-  비슷하면 새 라운드를 놓칠 수 있음(§9.1). 임계값은 실측으로 보정(§11.3),
-  `new_round_threshold >> stability_tolerance` 여유를 둔다.
+- 새 라운드에서 `정답`이 안정되면 `NEW_TARGET` → main이 이 타깃으로 폐루프 시작.
+- 라운드 진행 중 `정답`은 불변, `선택`만 변하므로 라운드 감지가 깔끔.
 
-### 5.3 I/O 래퍼
-
-- `capture.grab(region) -> ndarray` : `np.array(sct.grab(region))[:, :, :3]`
-  (BGRA→BGR). 모든 하류 배열은 3채널 보장.
-- `clicker.click(x, y, cfg)` : (선택) 대상 창 foreground 확인/보정 → `SetCursorPos`
-  → 짧은 dwell → `SendInput` LEFTDOWN → `click_hold_ms` → LEFTUP.
-  - `SendInput` 사용(권장; `mouse_event`는 공식적으로 superseded). 좌표는 DPI-aware
-    물리 픽셀. `SetCursorPos`는 음수 좌표(좌/상단 모니터)도 처리.
-- `hotkeys` : F8 arm 토글(시작 disarm), F9 종료.
-
-### 5.4 `main.py` 루프 배선
+### 5.4 `main.py` 폐루프 배선
 
 ```
-dpi.set_dpi_aware()                     # 첫 줄
-cfg = config.load()
+dpi.set_dpi_aware(); cfg = config.load()
 if not config.is_calibrated(cfg): exit("calibrate.py를 먼저 실행하세요")
-rs = RoundState(cfg)
-loop (loop_delay_ms 간격):
+ts = TargetState(cfg); gain = cfg.initial_gain; prev_v = prev_P = None
+C = center_point(cfg.palette) 혹은 cfg.marker (있으면 우선)
+
+loop (loop_delay_ms):
   if not armed: continue
-  img = capture.grab(cfg.answer_swatch)                 # BGR
-  color, disp = coloralg.swatch_color(img)
-  if rs.observe(color, disp) == 'ATTEMPT':
-      palette = capture.grab(cfg.palette)               # 매 라운드 새로 캡처
-      col, row, min_dist = coloralg.find_nearest_cluster(palette, color, cfg.cluster_eps)
-      sx, sy = cfg.palette.left + col, cfg.palette.top + row
-      if min_dist > cfg.max_match_dist:
-          log(f"UNSOLVABLE min_dist={min_dist:.1f} → 클릭 스킵")   # fail-safe (§2.1)
-      elif not respects_min_interval(now, last_click):
-          log("클릭 간격 가드로 스킵")
-      elif dry_run:
-          log(f"[dry-run] target=({sx},{sy}) min_dist={min_dist:.1f}")
-          save_debug_image(palette, col, row)           # 목표 지점 마킹 저장
-      else:
-          clicker.click(sx, sy, cfg); last_click = now
-      rs.mark_solved(color)
+  ans, ans_disp = swatch_color(capture.grab(cfg.answer_swatch))
+  if ts.observe(ans, ans_disp) == 'NEW_TARGET':
+      gain = cfg.initial_gain; prev_v = prev_P = None      # 새 라운드 → 컨트롤러 리셋
+
+  target = ts.target
+  if target is None: continue
+
+  cur, _ = swatch_color(capture.grab(cfg.selected_swatch))  # 현재 중앙색(마커 가림 회피)
+  if controller.is_matched(cur, target, cfg.match_tolerance):
+      continue                                              # 이 라운드 완료, 정답 바뀔 때까지 대기
+
+  pal = capture.grab(cfg.palette)
+  col, row, mind = find_nearest_cluster(pal, target, cfg.cluster_eps)
+  P = (cfg.palette.left+col, cfg.palette.top+row); e = P - C
+
+  if prev_P is not None and prev_v is not None:
+      gain = controller.update_gain(gain, prev_v, P - prev_P)   # 실측 보정
+  plan = controller.plan_drag(e, gain, C, cfg.palette, cfg.max_drag_frac)
+  if plan is None: continue
+  start, end = plan
+  if dry_run:
+      log(f"[dry-run] target@{P} e={e} gain={gain:.2f} drag {start}->{end} mind={mind:.1f}")
+      save_debug_image(pal, col, row)
+  else:
+      clicker.drag(start, end, cfg)                         # down→보간 이동→up
+      prev_P = P; prev_v = (end - start)
 ```
 
-- **3초 예산**: `loop_delay_ms=30`(~33fps)이면 감지+캡처+매칭+클릭이 3초 대비
-  충분히 빠름 → 별도 타임아웃 로직 불필요. 단 dry-run에서 루프별 wall-time을
-  로그해 실측 마진을 확인(§11.3).
-- **rate 가드**: `min_click_interval_ms`(기본 500)로 우발적 연속 클릭 방지
-  (상태 머신 dedup이 1차 방어, 이건 보조).
+- **드래그 등록**: 웹뷰가 드래그로 인식하려면 텔레포트가 아니라 다운 후 여러
+  보간 move 이벤트 → 업. `drag_steps`/`drag_step_ms`로 제어.
+- **3초 예산**: 반복당 캡처+매칭+드래그가 수십 ms → 3초 안에 수 회 보정 가능.
+  안전상 라운드별 `round_budget_ms`(예: 2800) 초과 시 best-effort로 멈춤.
+- **발산/역방향**: `update_gain`이 측정 이동으로 gain을 잡고, 오차가 커지면
+  `plan_drag`가 방향 반전/감쇠. dry-run/통합 테스트로 부호 방향 최초 확인.
 
 ## 6. 설정 파일 (`config.json`)
 
 ```json
 {
-  "answer_swatch": { "left": 0, "top": 0, "width": 0, "height": 0 },
-  "palette":       { "left": 0, "top": 0, "width": 0, "height": 0 },
+  "answer_swatch":   { "left": 0, "top": 0, "width": 0, "height": 0 },
+  "selected_swatch": { "left": 0, "top": 0, "width": 0, "height": 0 },
+  "palette":         { "left": 0, "top": 0, "width": 0, "height": 0 },
+  "marker":          { "x": 0, "y": 0 },
 
   "stability_tolerance": 6,
   "stability_frames": 2,
   "dispersion_tolerance": 12,
   "new_round_threshold": 40,
 
+  "match_tolerance": 10,
   "cluster_eps": 6,
-  "max_match_dist": 30,
+  "initial_gain": 1.0,
+  "max_drag_frac": 0.6,
 
-  "loop_delay_ms": 30,
-  "click_hold_ms": 20,
-  "min_click_interval_ms": 500
+  "loop_delay_ms": 20,
+  "drag_steps": 12,
+  "drag_step_ms": 6,
+  "round_budget_ms": 2800
 }
 ```
 
-- 좌표는 **물리 픽셀 절대 좌표**(가상 화면 기준, 음수 가능).
-- 색 관련 임계값은 §4 지표(0~441) 기준. **모두 실측으로 보정**하는 초기값이다.
+- 좌표는 물리 픽셀 절대 좌표(가상 화면, 음수 가능). `marker` 미지정 시 팔레트
+  기하 중심을 C로 사용.
+- 색 임계값은 §4(0~441) 기준의 **실측 보정 초기값**.
 
 ### 6.1 검증
 
-- `is_calibrated(cfg)`: 두 Region 모두 `width>0 and height>0`인지 확인. 아니면
-  `main.py`가 안내 메시지 후 종료.
+- `is_calibrated(cfg)`: `answer_swatch`, `selected_swatch`, `palette` 세 Region이
+  모두 `width>0 and height>0`인지. 아니면 `main.py`가 안내 후 종료.
 
-## 7. 캘리브레이션 흐름 (`calibrate.py`)
+## 7. 캘리브레이션 (`calibrate.py`)
 
-1. `dpi.set_dpi_aware()` (첫 줄, 창 생성 전).
-2. **모니터 선택**: 기본은 전체 가상 화면(`sct.monitors[0]`)을 캡처 → ROI 좌표가
-   곧 가상 화면 절대 좌표가 되어 오프셋 변환이 단순해진다. 여러 모니터면
-   `--monitor N`으로 특정 모니터(`monitors[N]`)만 캡처 가능.
-   - 저장 규칙(단일 규약): `absolute = captured_origin + roi_offset`, 여기서
-     `captured_origin`은 실제 사용한 mss monitor dict의 `left/top`(음수 가능).
-     `monitors[0]` 사용 시 그 origin이 곧 가상화면 원점이다.
-3. **selectROI 스케일 안전 처리**: 캡처 이미지가 화면보다 크면(4K/배율/멀티모니터)
-   기본 `selectROI` 창이 넘쳐 드래그 불가/스케일 좌표 오염이 생긴다. 따라서:
-   - 화면에 들어오도록 **다운스케일한 복사본**을 표시하되, 반환된 (x,y,w,h)에
-     **정확한 스케일 배수를 곱해 원본 픽셀로 되돌린 뒤** 저장한다. 스케일된
-     이미지를 그대로 쓰고 원좌표를 저장하지 않는다.
-4. `selectROI`로 (1) 정답 스와치, (2) 팔레트 사각형 지정 → 위 규칙으로 절대
-   좌표 계산 → `config.json` 저장.
-5. **확인**: 저장 좌표로 두 영역을 다시 grab해 대표색/썸네일을 출력(스케일/오프셋
-   실수 즉시 발견).
+1. `dpi.set_dpi_aware()` (첫 줄).
+2. **모니터 선택**: 기본 전체 가상 화면(`monitors[0]`) 캡처 → ROI가 곧 절대
+   좌표. `--monitor N`로 특정 모니터 지정 가능. 저장 규약: `absolute =
+   captured_origin(left/top, 음수 가능) + roi_offset`.
+3. **스케일-안전 selectROI**: 캡처가 화면보다 크면 다운스케일 복사본을 보여주되
+   반환 (x,y,w,h)에 스케일 배수를 곱해 원본 픽셀로 되돌려 저장(스케일 이미지의
+   좌표를 그대로 쓰지 않음).
+4. 지정 대상: (1) `정답` 스와치, (2) **`선택` 스와치**, (3) 팔레트 사각형,
+   (4) **마커점**(팔레트 중앙을 클릭; 생략 시 기하 중심 사용).
+5. **확인**: 저장 좌표로 재캡처해 각 영역 대표색/썸네일과 마커점을 출력(오프셋/
+   스케일 실수 즉시 발견).
 
 ## 8. 안전 및 검증 기능
 
-- **F8 arm/disarm** (시작 disarm), **F9 종료**.
-- **min-distance fail-safe** (§2.1): `max_match_dist` 초과 시 클릭 거부.
-- **`--dry-run`**: 클릭 대신 목표 좌표·min_dist·루프 wall-time 로그 + 팔레트에
-  목표 지점을 마킹한 디버그 이미지 저장. 실클릭 전 정확도/전제 검증용.
-- **min_click_interval 가드**: 우발적 연속 클릭 방지.
+- **F8 arm/disarm**(시작 disarm), **F9 종료**.
+- **수렴 관측 fail-safe**(§2.1): 미수렴 시 best-effort 정지 + 로그.
+- **`--dry-run`**: 드래그를 실행하지 않고 타깃 위치·오차 e·gain·계획된 드래그
+  벡터·mind와 디버그 이미지를 로그. (단, 폐루프 전체 검증은 실제 드래그 피드백이
+  필요하므로 실게임에서 수행 — §11.3.)
+- **round_budget 가드**: 라운드당 드래그 시간 상한.
 
-## 9. 엣지 케이스 및 알려진 한계
+## 9. 엣지 케이스 / 알려진 한계
 
-1. **연속 라운드 정답 색이 매우 유사**(≤ new_round_threshold) → 새 라운드 놓칠
-   수 있음. 임계값 실측 보정으로 완화, 잔여 한계로 문서화.
-2. **마커 핀이 정답 픽셀 가림** → 클러스터 중심점 방식이 가림 경계를 자연히
-   회피. 추가로 마지막 클릭 좌표 부근을 위치 기반 마스킹(색 기반 아님) 가능.
-   near-white 색 마스킹은 정답이 창백할 때 정답 영역을 지울 수 있어 지양.
-3. **DPI 배율** → §3.1 처리.
-4. **멀티 모니터** → §7의 단일 좌표 규약(음수 origin 포함)으로 처리. 캡처와
-   클릭이 동일 절대 좌표 사용.
-5. **캘리브 후 창 이동** → 좌표 무효화, `calibrate.py` 재실행.
-6. **게임 아닌 화면에서 arm** → 오클릭 가능. F8 disarm + min-distance 가드가 완화.
-7. **페이드 전환 중간색 오클릭** → dispersion 체크 + N-프레임 안정성 + '변화 후
-   안정' 요구로 완화. 잔여 위험은 실측으로 임계값 보정.
+1. **색 판 경계**: 정답 색이 판 가장자리에 있어 중앙까지 팬이 부족하면 정확
+   일치 불가 → best-effort. 미수렴 감지로 처리.
+2. **마커가 중앙 픽셀 가림** → 현재 색은 팔레트 중앙이 아니라 **`선택` 스와치**로
+   읽는다(설계에 반영).
+3. **드래그 미등록(텔레포트)** → 보간 move + dwell 필수. dry-run/통합에서 확인.
+4. **gain 방향/부호 오판** → 첫 드래그 후 측정으로 보정, 발산 시 반전(§5.4).
+5. **정답이 라운드 중간에 바뀜(시간초과 등)** → `observe`가 `NEW_TARGET` 재발화,
+   컨트롤러 리셋.
+6. **오버슈트/진동** → gain 추정 + `max_drag_frac` 감쇠.
+7. **DPI/멀티모니터** → §3.1, §7 규약(음수 origin 포함).
+8. **캘리브 후 창 이동** → 좌표 무효화, `calibrate.py` 재실행.
 
 ## 10. 검증이 필요한 가정 (실제 카톡에서 확인)
 
-- (A) 팔레트를 한 번 클릭하면 그게 바로 답으로 제출된다(별도 확인 버튼 없음).
-  드래그로 마커를 옮기는 방식이 아니라 탭/클릭으로 지정된다.
-  → 드래그 방식이면 `clicker`에 drag 동작만 추가.
-- (B) **[핵심 리스크]** 정답 색이 캡처한 팔레트 영역 안에 픽셀로 존재한다(§1.1).
-  창백/저채도 정답이 팔레트에 없을 수 있음. → §11.3 실측으로 검증하며, 없으면
-  캘리브 영역에 명도 슬라이더 등 추가 영역 포함 또는 접근법 조정.
-- (C) 마커 핀의 실제 색/형태(near-white 가정 검증).
+- (A) 드래그가 색 판을 이동시키는 방식(§1.1)이 맞고, 마우스 down→move→up
+  드래그가 게임에 등록된다.
+- (B) 색 판 이동 gain이 대략 일정하다(구간별로 크게 비선형이 아니다). 비선형이어도
+  폐루프가 국소적으로 수렴하지만, 심하면 스텝을 더 잘게.
+- (C) 드래그 중/후 `선택` 스와치가 실시간으로 현재 중앙색을 반영한다(피드백 신호로 사용).
+- (D) 드래그를 놓아도(up) 선택이 "제출/잠금"되지 않고 계속 조정 가능하다.
 
 ## 11. 테스트 전략
 
-### 11.1 단위 테스트 (순수 로직, 화면 불필요)
-- `coloralg.color_dist` — 알려진 값 검증.
-- `coloralg.swatch_color` — 합성 이미지의 median/ dispersion 검증(평탄 vs 혼합).
-- `coloralg.find_nearest_cluster` — 합성 팔레트에 색을 심고 (col,row)·min_dist,
-  노이즈 픽셀 강인성(클러스터 중심) 검증.
-- `roundstate.RoundState` — 색 시퀀스 입력으로 action 시점 검증:
-  첫 라운드 solve, 중복 클릭 없음, 유사 라운드 스킵, 페이드 프레임 배제,
-  변화 후 재무장.
-- **좌표 변환** — (모니터 origin, ROI) → 절대 좌표 산술(음수 origin 포함) 검증.
+### 11.1 단위 테스트 (순수, 화면 불필요)
+- `coloralg.*` — color_dist / swatch_color(+dispersion) / find_nearest_cluster.
+- `controller.plan_drag` — 오차 e에 대한 드래그 방향·경계 클램프·start 내부성.
+- `controller.update_gain` — 측정 이동에 대한 gain 수렴.
+- `controller` **폐루프 시뮬레이션** — 알려진 gain의 가상 색 판(정답 픽셀을 담은
+  이동 가능한 필드)을 모델링해, 컨트롤러가 N스텝 내 `match_tolerance`로 수렴하고
+  gain 오차/역부호에서도 발산하지 않음을 검증. **핵심 신규 테스트.**
+- `targetstate.observe` — 새 타깃 발화, 유사 라운드/전환 프레임 처리.
+- 좌표 변환(모니터 origin, ROI → 절대, 음수 포함).
 
-### 11.2 수동/통합 테스트
-- `--dry-run`으로 실게임에서 목표 좌표·디버그 이미지 확인.
-- 클릭 활성화 후 1라운드 → 전체 5라운드 검증. F8/F9가 게임 포커스 상태에서
-  동작하는지 확인.
+### 11.2 수동/통합
+- `--dry-run`으로 타깃 위치·계획 드래그·디버그 이미지 확인.
+- 실드래그 활성화 후: 1회 보정 방향이 맞는지 → 1라운드 수렴 → 5라운드.
+- 게임 포커스 상태에서 F8/F9와 드래그 등록 확인.
 
-### 11.3 전제 실측 (구현 전/중 필수)
-- 여러 실제 라운드(창백·고채도 정답 모두 포함)에서 `find_nearest_cluster`의
-  `min_dist`를 수집·로그.
-- 모든 라운드에서 min_dist가 작게(수 LSB) 유지되면 §1.1 전제 성립 → 진행.
-- 창백 정답에서 min_dist가 크면 전제 불성립 → 캘리브 영역/접근법 조정(§10-B).
-- 루프별 wall-time을 측정해 3초 예산 대비 마진 확인.
+### 11.3 실게임 실측 (구현 중 필수)
+- 첫 드래그의 **부호/방향**이 맞는지(색 판이 예상 방향으로 움직이는지) 확인.
+- gain 초기값과 수렴 스텝 수, 라운드당 소요 시간(3초 예산 대비) 측정·튜닝.
+- 창백/고채도 정답 모두에서 `선택`이 목표까지 수렴하는지(도달성) 확인.
 
-## 12. 구현 순서 (개략)
+## 12. 구현 순서
 
-1. `config.py`(+검증) · `dpi.py` · `capture.py`(BGRA→BGR) 골격.
+1. `config.py`(+검증) · `dpi.py` · `capture.py`(BGRA→BGR).
 2. `coloralg.py` (TDD).
-3. `roundstate.py` (TDD) — 상태 머신 시퀀스 테스트.
-4. `calibrate.py` — 스케일 안전 selectROI → config 생성.
-5. `clicker.py` — Win32 SendInput 클릭.
-6. `main.py` — 루프 배선 + `--dry-run` + 미캘리브 가드.
-7. `hotkeys.py` 통합, README(권한/실행법/전제 검증) 작성.
-8. **실게임 dry-run으로 §11.3 전제·좌표 정확도 검증 → 실클릭 검증.**
+3. `controller.py` (TDD, 폐루프 시뮬레이션 포함).
+4. `targetstate.py` (TDD).
+5. `calibrate.py` — 스케일-안전 selectROI + 4개 지정(정답/선택/팔레트/마커).
+6. `clicker.py` — Win32 SendInput move/**drag**(보간).
+7. `main.py` — 폐루프 배선 + `--dry-run` + 미캘리브 가드.
+8. `hotkeys.py` 통합, README(권한/실행/검증) 작성.
+9. **실게임: 드래그 방향/gain/수렴 실측 → dry-run → 실플레이 검증.**
