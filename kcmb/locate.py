@@ -32,9 +32,11 @@ def _has_marker(sub_bgr):
 
 def find_band(bgr):
     """팔레트의 색 그라데이션 영역 (x,y,w,h) 반환, 없으면 None.
-    폭(~일정)으로 후보를 좁히고, 중앙의 흰 마커 존재로 아이콘/썸네일 등 오검출을 배제."""
+    창-범위(게임 창) 안에서 쓰므로 decoy가 없다 → 폭이 맞는 최대 그라데이션이 팔레트.
+    마커(핀)는 '선택' 색을 띠어 흰색이 아닐 수 있으므로 필수 조건으로 쓰지 않고,
+    흰 마커가 있으면 우선(전체화면 폴백 시 decoy 배제용)하는 정도로만 사용."""
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    mask = (hsv[:, :, 1] > 60).astype(np.uint8) * 255
+    mask = (hsv[:, :, 1] > 50).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     cnts, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     marked, plain = [], []
@@ -42,17 +44,13 @@ def find_band(bgr):
         x, y, w, h = cv2.boundingRect(c)
         if not (280 < w < 380 and 90 < h < 320):   # 팔레트 폭은 일정, 높이는 가변
             continue
+        sub = hsv[y:y + h, x:x + w]
+        hues = sub[:, :, 0][sub[:, :, 1] > 50]
+        if hues.size == 0 or int(np.ptp(hues)) < 40:   # near-solid(버튼/텍스트) 배제
+            continue
         cen = bgr[y + h // 5:y + 4 * h // 5, x + w // 3:x + 2 * w // 3]
-        if _has_marker(cen):
-            # 중앙 흰 마커 = 팔레트의 확실한 신호. 색 범위가 좁아도(노랑-초록 등) 채택.
-            marked.append((x, y, w, h))
-        else:
-            # 마커 없는 후보는 넓은 hue 범위일 때만 폴백 대상으로(decoy 배제)
-            sub = hsv[y:y + h, x:x + w]
-            hues = sub[:, :, 0][sub[:, :, 1] > 60]
-            if hues.size and int(np.ptp(hues)) >= 90:
-                plain.append((x, y, w, h))
-    pool = marked or plain   # 마커 있는 것 우선; 없을 때만 넓은-hue 폴백
+        (marked if _has_marker(cen) else plain).append((x, y, w, h))
+    pool = marked or plain   # 흰 마커 있으면 우선, 없으면 최대 그라데이션(창 안이라 안전)
     if not pool:
         return None
     return max(pool, key=lambda b: b[2] * b[3])
@@ -98,36 +96,50 @@ def locate(bgr, ox=0, oy=0):
     return out
 
 
-def _locate_in_rect(full, ox, oy, rect):
-    l, t, r, b = rect
-    x0, y0 = max(0, l - ox), max(0, t - oy)
-    x1, y1 = min(full.shape[1], r - ox), min(full.shape[0], b - oy)
-    if x1 - x0 < 150 or y1 - y0 < 150:
-        return None
-    return locate(full[y0:y1, x0:x1], ox + x0, oy + y0)
+# 게임 창(전체, 타이틀바 포함) 대비 UI 요소의 고정 비율 (420x640 창에서 측정).
+# 게임 창은 고정 크기 팝업이라 팔레트/스와치 위치가 창 대비 일정 → 팔레트 색/채도
+# 분포와 무관하게 정확히 영역을 얻는다.
+_FRAC = {
+    "answer_swatch": (0.3095, 0.4062, 0.1714, 0.1125),
+    "selected_swatch": (0.5190, 0.4062, 0.1714, 0.1125),
+    "palette": (0.1095, 0.5406, 0.7810, 0.3844),
+}
+
+
+def regions_from_window(l, t, ww, hh):
+    """게임 창 사각형 대비 고정 비율로 {answer_swatch, selected_swatch, palette} 계산."""
+    return {k: Region(int(l + fx * ww), int(t + fy * hh), int(fw * ww), int(fh * hh))
+            for k, (fx, fy, fw, fh) in _FRAC.items()}
+
+
+def palette_is_gradient(bgr):
+    """팔레트 영역 crop이 실제 색 그라데이션인지(시작/플레이 화면) 판정.
+    결과화면(흰 배경+텍스트)은 채도 높은 픽셀이 거의 없어(≈5%) 걸러진다
+    (진짜 팔레트는 창백해도 ≈60%가 채도>60)."""
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1]
+    if float((sat > 60).mean()) < 0.20:
+        return False
+    hues = hsv[:, :, 0][sat > 40]
+    return hues.size > 500 and int(np.ptp(hues)) > 55
 
 
 def locate_live():
-    """게임을 검출한다. 우선순위: (1) 커서 아래 창 (2) 활성 창 (3) 전체 화면.
-    사용자가 게임 창 위에 마우스를 올려두면 그 창 안에서만 찾으므로 다른 창의
-    컬러풀한 요소를 오검출하지 않는다. dict 또는 None."""
-    import mss
-    from .input_win import window_under_cursor, foreground_rect
-    with mss.mss() as sct:
-        m = sct.monitors[1]
-        full = np.asarray(sct.grab(m))[:, :, :3]
-        ox, oy = m["left"], m["top"]
-    wc = window_under_cursor()
-    if wc is not None:
-        res = _locate_in_rect(full, ox, oy, wc[1])
-        if res is not None:
-            return res
-    fr = foreground_rect()
-    if fr is not None:
-        res = _locate_in_rect(full, ox, oy, fr)
-        if res is not None:
-            return res
-    return locate(full, ox, oy)
+    """Win32로 게임 창을 찾아 고정 비율로 영역 계산. 팔레트가 그라데이션일 때만
+    반환(결과화면 등은 None). 커서 위치와 무관. dict 또는 None."""
+    from . import capture
+    from .input_win import find_game_window
+    gw = find_game_window()
+    if gw is None:
+        return None
+    l, t, r, b = gw[1]
+    reg = regions_from_window(l, t, r - l, b - t)
+    try:
+        if not palette_is_gradient(capture.grab(reg["palette"])):
+            return None
+    except Exception:
+        return None
+    return reg
 
 
 def apply_to(cfg, regions):

@@ -59,14 +59,14 @@ class Config:
     empty_color: List[int] = field(default_factory=lambda: [247, 247, 247])
     empty_tol: float = 12
 
-    loop_delay_ms: int = 15
-    drag_pre_dwell_ms: int = 20
-    drag_steps: int = 20
-    drag_step_ms: int = 9
-    drag_end_dwell_ms: int = 40
-    settle_poll_ms: int = 15
+    loop_delay_ms: int = 8
+    drag_pre_dwell_ms: int = 12
+    drag_steps: int = 12
+    drag_step_ms: int = 5
+    drag_end_dwell_ms: int = 22
+    settle_poll_ms: int = 10
     settle_stable_reads: int = 2
-    settle_cap_ms: int = 120
+    settle_cap_ms: int = 70
 
     @property
     def marker_point(self) -> Optional[np.ndarray]:

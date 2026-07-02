@@ -84,6 +84,40 @@ def set_foreground(hwnd):
         pass
 
 
+def _proc_path(pid):
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    buf = ctypes.create_unicode_buffer(512)
+    size = wintypes.DWORD(512)
+    k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size))
+    k.CloseHandle(h)
+    return buf.value
+
+
+def find_game_window():
+    """카톡 색게임 팝업 창의 (hwnd, (left,top,right,bottom)). 없으면 None.
+    크기 시그니처(~420x640)로 채팅창(폭380)·메인창과 구분. 커서 위치 무관."""
+    u = ctypes.windll.user32
+    found = []
+
+    def cb(hwnd, lp):
+        if u.IsWindowVisible(hwnd):
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if "kakaotalk" in _proc_path(pid.value).lower():
+                r = wintypes.RECT(); u.GetWindowRect(hwnd, ctypes.byref(r))
+                t = ctypes.create_unicode_buffer(64); u.GetWindowTextW(hwnd, t, 64)
+                ww, hh = r.right - r.left, r.bottom - r.top
+                if t.value != "카카오톡" and 400 < ww < 460 and 560 < hh < 720:
+                    found.append((hwnd, (r.left, r.top, r.right, r.bottom)))
+        return True
+
+    u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)(cb), 0)
+    return found[0] if found else None
+
+
 def _send(flags, nx=0, ny=0):
     mi = _MOUSEINPUT(nx, ny, 0, flags, 0, 0)
     inp = _INPUT(0, _INPUT._U(mi))  # type 0 = INPUT_MOUSE
