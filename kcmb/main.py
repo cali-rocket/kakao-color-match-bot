@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import time
 
 import numpy as np
@@ -41,6 +42,63 @@ def _start_drag(cfg, Cpt):
     input_win.drag(s, e, cfg)
 
 
+def _click(pt):
+    input_win.left_down_at(np.asarray(pt, float))
+    time.sleep(0.03)
+    input_win.left_up_at(np.asarray(pt, float))
+
+
+def _activate_game():
+    """게임 창을 찾아 활성화(foreground + 제목표시줄 클릭) → 드래그가 그 창에 전달됨."""
+    gw = input_win.find_game_window()
+    if gw is None:
+        return False
+    hwnd, (l, t, r, b) = gw
+    input_win.set_foreground(hwnd)
+    _click((l + (r - l) // 2, t + 12))       # 제목표시줄 클릭으로 활성화
+    time.sleep(0.15)
+    return True
+
+
+def _find_replay_button(img, ox, oy):
+    """결과 화면의 노란 '게임 다시하기' 버튼 중심 (abs) 또는 None."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    yellow = ((hsv[:, :, 0] > 18) & (hsv[:, :, 0] < 40)
+              & (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 150)).astype(np.uint8)
+    yellow = cv2.morphologyEx(yellow, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, _l, stats, cents = cv2.connectedComponentsWithStats(yellow, 8)
+    best = None
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] > 400 and stats[i, cv2.CC_STAT_WIDTH] > 60:
+            if best is None or stats[i, cv2.CC_STAT_AREA] > best[0]:
+                best = (stats[i, cv2.CC_STAT_AREA], cents[i])
+    return None if best is None else (ox + best[1][0], oy + best[1][1])
+
+
+def _ensure_start(cfg):
+    """게임 창을 찾아 시작/플레이 화면으로 만든다(결과화면이면 '다시하기' 클릭).
+    성공 시 regions dict, 실패 시 None."""
+    for _ in range(50):
+        gw = input_win.find_game_window()
+        if gw is None:
+            time.sleep(0.3)
+            continue
+        hwnd, (l, t, r, b) = gw
+        input_win.set_foreground(hwnd)
+        reg = locate.regions_from_window(l, t, r - l, b - t)
+        if locate.palette_is_gradient(capture.grab(reg["palette"])):
+            return reg
+        img = capture.grab(C.Region(l, t, r - l, b - t))   # 결과화면 → 다시하기
+        btn = _find_replay_button(img, l, t)
+        if btn is not None:
+            _activate_game()
+            _click(btn)
+            time.sleep(1.3)
+        else:
+            time.sleep(0.4)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="계산만, 드래그 안 함")
@@ -53,48 +111,37 @@ def main():
     args = ap.parse_args()
     auto = not args.no_auto   # 기본: 게임 영역 자동검출(창 이동에 무관)
 
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     dpi.set_dpi_aware()
     cfg = C.load()
     headless = args.seconds > 0
 
-    def relocate():
-        reg = locate.locate_live()
-        if reg is not None:
-            locate.apply_to(cfg, reg)
-            return True
-        return False
-
-    # arm 설정 + (헤드리스) 마우스로 게임 창 지목 유도
     if headless:
         class _Auto:
             armed = True
             should_quit = False
         hk = _Auto()
         t_quit = _now() + args.seconds
-        if args.focus_delay > 0:
-            print(f">>> {args.focus_delay:.0f}초 안에 카톡 게임 창 위로 마우스를 올려두세요! (그 창을 인식해 플레이합니다)")
-            time.sleep(args.focus_delay)
-        if auto:
-            wc = input_win.window_under_cursor()
-            if wc is not None:
-                input_win.set_foreground(wc[0])   # 그 창을 앞으로(드래그가 전달되도록)
-                time.sleep(0.2)
     else:
         hk = install(HotkeyState())
         t_quit = None
         print("F8=arm/disarm, F9=quit." + (" (dry-run)" if args.dry_run else ""))
 
-    # 게임 영역 검출 (헤드리스면 커서가 게임 창 위 → 그 창 안에서만 탐색)
+    # 게임 창을 찾아 시작/플레이 화면으로 만들고(결과화면이면 다시하기), 영역 계산
     if auto:
-        if relocate():
-            print("게임 인식:", cfg.palette)
+        reg = _ensure_start(cfg)
+        if reg is not None:
+            locate.apply_to(cfg, reg)
+            print("game recognized:", cfg.palette)
         elif not C.is_calibrated(cfg):
-            print("게임을 찾지 못했습니다 — 마우스를 게임 창 위에 두었는지 확인하세요.")
+            print("game window not found - open the KakaoTalk color game.")
             return
-        else:
-            print("자동검출 실패 — config.json 좌표로 대체")
     if not C.is_calibrated(cfg):
-        print("calibrate 먼저: python -m kcmb.calibrate")
+        print("run calibrate first: python -m kcmb.calibrate")
         return
 
     Cpt = cfg.marker_point if cfg.marker_point is not None else cfg.palette.center()
@@ -113,6 +160,8 @@ def main():
         if not hk.armed:
             continue
         if args.autostart and not started:
+            if auto:
+                _activate_game()          # 시작 드래그 전 게임 창 포커스 확실히
             _start_drag(cfg, Cpt)
             started = True
 
