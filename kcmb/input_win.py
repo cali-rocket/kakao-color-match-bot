@@ -95,21 +95,19 @@ def _abs_flags(extra=0):
 
 
 def move_abs(pt, vm=None):
-    vm = vm or vscreen_metrics()
-    nx, ny = to_absolute(pt[0], pt[1], *vm)
-    _send(_abs_flags(), nx, ny)
+    # SetCursorPos: 물리 픽셀 직접(DPI-aware), 멀티모니터 정확. SendInput ABSOLUTE는
+    # 이 환경에서 좌표가 어긋나 사용하지 않는다.
+    ctypes.windll.user32.SetCursorPos(int(round(pt[0])), int(round(pt[1])))
 
 
 def left_down_at(pt, vm=None):
-    vm = vm or vscreen_metrics()
-    nx, ny = to_absolute(pt[0], pt[1], *vm)
-    _send(_abs_flags(MOUSEEVENTF_LEFTDOWN), nx, ny)
+    move_abs(pt)
+    ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
 
 
 def left_up_at(pt, vm=None):
-    vm = vm or vscreen_metrics()
-    nx, ny = to_absolute(pt[0], pt[1], *vm)
-    _send(_abs_flags(MOUSEEVENTF_LEFTUP), nx, ny)
+    move_abs(pt)
+    ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
 def drag(start, end, cfg):
